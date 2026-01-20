@@ -1,0 +1,26 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training artifacts
+outputs/
+checkpoints/
+*.log
+
+# Data (optional; keep raw data out of git)
+data/raw/
+data/processed/
