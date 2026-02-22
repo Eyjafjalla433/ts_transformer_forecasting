@@ -4,18 +4,20 @@ import math
 
 # Time Series Embedding
 class TimeSeriesEmbedding(nn.Module):
+    """Map time-series features [B, L, input_dim] to model states [B, L, d_model]."""
     def __init__(self, input_dim, d_model):
         super(TimeSeriesEmbedding, self).__init__()
         self.embedding = nn.Linear(input_dim, d_model) 
         self.position_encoding = PositionalEncoding(d_model, dropout=0.1)
 
     def forward(self, x):
+        """x: [B, L, input_dim] -> [B, L, d_model]."""
         x = self.embedding(x)
         x = self.position_encoding(x) 
         return x
 
 class PositionalEncoding(nn.Module):
-    "Implement the PE function."
+    """Add sinusoidal positional encoding to [B, L, d_model]."""
     def __init__(self, d_model, dropout, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -29,5 +31,6 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x):
+        """x: [B, L, d_model] -> [B, L, d_model]."""
         x = x + self.pe[:, : x.size(1)].requires_grad_(False)
         return self.dropout(x)

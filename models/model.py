@@ -5,6 +5,7 @@ from .attention import MultiHeadedAttention
 from .layers import PositionwiseFeedForward
 
 class TransformerTimeSeriesModel(nn.Module):
+    """Encoder-decoder Transformer for time-series forecasting."""
     def __init__(self, src_dim, d_model, N, h, d_ff, dropout=0.1, tgt_dim=None, out_dim=1):
         super(TransformerTimeSeriesModel, self).__init__()
         if tgt_dim is None:
@@ -16,6 +17,14 @@ class TransformerTimeSeriesModel(nn.Module):
         self.generator = nn.Linear(d_model, out_dim)
 
     def forward(self, src, tgt, src_mask, tgt_mask):
+        """Forward contract.
+
+        src: [B, L_in, src_dim]
+        tgt: [B, L_out, tgt_dim]
+        src_mask: [B, 1, L_in]
+        tgt_mask: [B, L_out, L_out]
+        returns: [B, L_out, out_dim]
+        """
         memory = self.encoder(self.src_embed(src), src_mask)
         output = self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
         return self.generator(output)

@@ -7,7 +7,10 @@ def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 class Encoder(nn.Module):
-    "Core encoder is a stack of N layers"
+    """Core encoder stack.
+
+    x: [B, L_in, d_model], mask: [B, 1, L_in]
+    """
 
     def __init__(self, layer, N):
         super(Encoder, self).__init__()
@@ -21,7 +24,11 @@ class Encoder(nn.Module):
         return self.norm(x)
     
 class Decoder(nn.Module):
-    "Generic N layer decoder with masking."
+    """Generic N-layer decoder.
+
+    x: [B, L_out, d_model], memory: [B, L_in, d_model]
+    src_mask: [B, 1, L_in], tgt_mask: [B, L_out, L_out]
+    """
 
     def __init__(self, layer, N):
         super(Decoder, self).__init__()
@@ -46,7 +53,7 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(self.w_1(x).relu()))
 
 class EncoderLayer(nn.Module):
-    "Encoder is made up of self-attn and feed forward (defined below)"
+    """Encoder layer with self-attention and feed-forward network."""
 
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(EncoderLayer, self).__init__()
@@ -60,7 +67,7 @@ class EncoderLayer(nn.Module):
         return self.sublayer[1](x, self.feed_forward)
 
 class DecoderLayer(nn.Module):
-    "Decoder is made of self-attn, src-attn, and feed forward (defined below)"
+    """Decoder layer with self-attn, cross-attn, and feed-forward network."""
 
     def __init__(self, size, self_attn, src_attn, feed_forward, dropout):
         super(DecoderLayer, self).__init__()

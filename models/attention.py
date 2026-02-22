@@ -4,7 +4,11 @@ import math
 import copy
 
 def attention(query, key, value, mask=None, dropout=None):
-    "Compute 'Scaled Dot Product Attention'"
+    """Compute scaled dot-product attention.
+
+    query/key/value: [B, H, L, d_k]
+    mask (optional): broadcastable to [B, H, L, L]
+    """
     d_k = query.size(-1)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
     if mask is not None:
@@ -25,6 +29,7 @@ class MultiHeadedAttention(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, query, key, value, mask=None):
+        """query/key/value: [B, L, d_model], mask: [B, 1, L] or [B, L, L]."""
         if mask is not None:
             mask = mask.unsqueeze(1)
         nbatches = query.size(0)
