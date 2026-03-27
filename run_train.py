@@ -1,10 +1,10 @@
-import csv
+﻿import csv
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from data import TimeSeriesWindowDataset
 from engine import Batch, SimpleLossCompute, TrainState, run_epoch
@@ -14,7 +14,7 @@ from utils.config import load_config
 
 
 def load_series_from_csv(path: str, has_header: bool = True) -> torch.Tensor:
-    """Load numeric time-series table from CSV into a float tensor [T, F]."""
+    """Load a numeric [T, F] time-series table from CSV."""
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError("Training CSV not found: {}".format(csv_path))
@@ -55,6 +55,68 @@ def build_batch_iter(loader: DataLoader, device: torch.device) -> Iterable[Batch
         yield Batch(src, tgt_full, pad_value=None)
 
 
+def resolve_column_slices(
+    series_width: int,
+    src_dim: int,
+    tgt_dim: int,
+    out_dim: int,
+) -> Tuple[List[int], List[int], List[int]]:
+    """Use the first src_dim columns as input and the last target columns as outputs."""
+    if src_dim <= 0 or tgt_dim <= 0 or out_dim <= 0:
+        raise ValueError("src_dim, tgt_dim, and out_dim must be positive.")
+    if series_width < src_dim:
+        raise ValueError("Series has {} columns but src_dim is {}.".format(series_width, src_dim))
+    if series_width < max(tgt_dim, out_dim):
+        raise ValueError(
+            "Series has {} columns but target/output dimensions require at least {} columns."
+            .format(series_width, max(tgt_dim, out_dim))
+        )
+
+    src_cols = list(range(src_dim))
+    tgt_cols = list(range(series_width - tgt_dim, series_width))
+    out_cols = list(range(series_width - out_dim, series_width))
+    return src_cols, tgt_cols, out_cols
+
+
+def split_series_for_train_val(
+    series: torch.Tensor,
+    val_ratio: float,
+    input_length: int,
+    pred_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Split the raw [T, F] table chronologically for train/validation.
+
+    Validation keeps an input_length overlap so its first window can look back
+    into the training history without leaking validation targets into training.
+    """
+    if not 0.0 < val_ratio < 1.0:
+        raise ValueError("val_ratio must be between 0 and 1.")
+
+    total_steps = int(series.size(0))
+    min_train_steps = input_length + pred_length
+    min_total_steps = input_length + 2 * pred_length
+    if total_steps < min_total_steps:
+        raise ValueError(
+            "Need at least {} timesteps for chronological train/val splitting, but got {}."
+            .format(min_total_steps, total_steps)
+        )
+
+    val_steps = max(pred_length, int(total_steps * val_ratio))
+    val_start = total_steps - val_steps
+    val_start = max(val_start, min_train_steps)
+    val_start = min(val_start, total_steps - pred_length)
+
+    train_series = series[:val_start]
+    val_series = series[val_start - input_length:]
+
+    if train_series.size(0) < min_train_steps:
+        raise ValueError("Training split is too short for the requested window lengths.")
+    if val_series.size(0) < min_train_steps:
+        raise ValueError("Validation split is too short for the requested window lengths.")
+
+    return train_series, val_series
+
+
 def main():
     """Train the model for multiple epochs and save the best checkpoint."""
     cfg = load_config("configs/default.yaml")
@@ -87,36 +149,37 @@ def main():
     else:
         series = build_synthetic_series(synthetic_steps, src_dim)
 
-    if series.size(1) < src_dim:
-        raise ValueError("Series has {} columns but src_dim is {}.".format(series.size(1), src_dim))
+    src_cols, tgt_cols, out_cols = resolve_column_slices(
+        series_width=int(series.size(1)),
+        src_dim=src_dim,
+        tgt_dim=tgt_dim,
+        out_dim=out_dim,
+    )
 
-    src_cols = list(range(src_dim))
-    tgt_cols = [src_dim - 1 + i for i in range(tgt_dim)]
-    out_cols = [src_dim - 1 + i for i in range(out_dim)]
-    if max(tgt_cols + out_cols) >= series.size(1):
-        raise ValueError(
-            "Series has {} columns, but target/output columns require at least {} columns."
-            .format(series.size(1), max(tgt_cols + out_cols) + 1)
-        )
-
-    dataset = TimeSeriesWindowDataset(
+    val_ratio = float(train_cfg.get("val_ratio", 0.2))
+    train_series, val_series = split_series_for_train_val(
         series=series,
+        val_ratio=val_ratio,
+        input_length=input_length,
+        pred_length=pred_length,
+    )
+
+    train_set = TimeSeriesWindowDataset(
+        series=train_series,
         input_length=input_length,
         pred_length=pred_length,
         src_cols=src_cols,
         tgt_cols=tgt_cols,
         out_cols=out_cols,
     )
-
-    val_ratio = float(train_cfg.get("val_ratio", 0.2))
-    val_size = max(1, int(len(dataset) * val_ratio))
-    train_size = len(dataset) - val_size
-    if train_size <= 0:
-        raise ValueError("Not enough samples to split into train/val.")
-
-    split_seed = int(train_cfg.get("split_seed", 42))
-    generator = torch.Generator().manual_seed(split_seed)
-    train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
+    val_set = TimeSeriesWindowDataset(
+        series=val_series,
+        input_length=input_length,
+        pred_length=pred_length,
+        src_cols=src_cols,
+        tgt_cols=tgt_cols,
+        out_cols=out_cols,
+    )
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
@@ -146,6 +209,11 @@ def main():
     checkpoint_path = infer_cfg.get("checkpoint_path", "checkpoints/model.pt")
     checkpoint_path = Path(checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(
+        "Loaded series shape: {} | train steps: {} | val steps: {} | train windows: {} | val windows: {}"
+        .format(tuple(series.shape), train_series.size(0), val_series.size(0), len(train_set), len(val_set))
+    )
 
     for epoch in range(1, num_epochs + 1):
         model.train()
