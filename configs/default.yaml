@@ -34,10 +34,12 @@ train:
   val_ratio: 0.2
   accum_iter: 1
   split_seed: 42
-  device: "cpu"
+#  device: "cpu"
+  device: "cuda"
 
 infer:
-  device: "cpu"
+#  device: "cpu"
+  device: "cuda"
   checkpoint_path: "checkpoints/model.pt"
   input_path: "data/infer_input.csv"
   input_has_header: true

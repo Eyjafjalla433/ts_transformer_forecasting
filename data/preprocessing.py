@@ -2,7 +2,7 @@
 
 import argparse
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -128,6 +128,34 @@ def extract_last_input_window(table: pd.DataFrame, input_length: int) -> pd.Data
     return table.tail(input_length).reset_index(drop=True)
 
 
+def split_wide_table_for_future(
+    wide_table: pd.DataFrame,
+    future_ratio: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Chronologically split [T, F] table into train part and future holdout."""
+    if not 0.0 < future_ratio < 1.0:
+        raise ValueError("future_ratio must be between 0 and 1.")
+
+    total_rows = len(wide_table)
+    if total_rows < 2:
+        raise ValueError("Need at least 2 rows to split train/future.")
+
+    future_rows = max(1, int(total_rows * future_ratio))
+    split_idx = total_rows - future_rows
+    split_idx = min(max(split_idx, 1), total_rows - 1)
+
+    train_table = wide_table.iloc[:split_idx].reset_index(drop=True)
+    future_table = wide_table.iloc[split_idx:].reset_index(drop=True)
+    return train_table, future_table
+
+
+def _derive_split_paths(output_path: str) -> Tuple[str, str]:
+    path = Path(output_path)
+    train_path = path.with_name("{}_train.csv".format(path.stem))
+    future_path = path.with_name("{}_future.csv".format(path.stem))
+    return str(train_path), str(future_path)
+
+
 def save_wide_table(table: pd.DataFrame, output_path: str) -> None:
     """Save the processed [T, F] table as a CSV with feature headers."""
     path = Path(output_path)
@@ -190,6 +218,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional. Validate that the processed table can provide the last inference window.",
     )
+    parser.add_argument(
+        "--future-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Optional chronological holdout ratio for future_wide split. "
+            "Example: 0.2 means first 80% train_wide, last 20% future_wide."
+        ),
+    )
+    parser.add_argument(
+        "--train-output-path",
+        default=None,
+        help="Optional output path for train split wide CSV.",
+    )
+    parser.add_argument(
+        "--future-output-path",
+        default=None,
+        help="Optional output path for future split wide CSV.",
+    )
     return parser
 
 
@@ -210,6 +257,23 @@ def main() -> None:
     print("Saved processed table to:", args.output_path)
     print("Processed shape:", tuple(wide_table.shape))
     print("Columns:", list(wide_table.columns))
+
+    if args.future_ratio is not None:
+        default_train_path, default_future_path = _derive_split_paths(args.output_path)
+        train_output_path = args.train_output_path or default_train_path
+        future_output_path = args.future_output_path or default_future_path
+
+        train_table, future_table = split_wide_table_for_future(
+            wide_table=wide_table,
+            future_ratio=float(args.future_ratio),
+        )
+        save_wide_table(train_table, train_output_path)
+        save_wide_table(future_table, future_output_path)
+
+        print("Saved train split to:", train_output_path)
+        print("Train split shape:", tuple(train_table.shape))
+        print("Saved future split to:", future_output_path)
+        print("Future split shape:", tuple(future_table.shape))
 
     if args.input_length is not None:
         last_window = extract_last_input_window(wide_table, input_length=args.input_length)
