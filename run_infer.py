@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -8,11 +8,9 @@ import torch
 from engine.infer import (
     autoregressive_forecast,
     build_model_from_config,
-    denormalize_tensor,
     export_predictions_to_csv,
     load_input_window_from_csv,
     load_model_weights,
-    load_normalization_stats,
     prepare_source_tensor,
     resolve_device,
 )
@@ -114,10 +112,6 @@ def run_offline_eval_from_future(
     model_cfg: Dict,
     data_cfg: Dict,
     infer_cfg: Dict,
-    input_mean: Optional[torch.Tensor],
-    input_std: Optional[torch.Tensor],
-    target_mean: Optional[torch.Tensor],
-    target_std: Optional[torch.Tensor],
 ) -> None:
     """Run rolling offline evaluation over future_wide and print metrics."""
     input_length = int(data_cfg["input_length"])
@@ -164,11 +158,6 @@ def run_offline_eval_from_future(
             .format(eval_start, eval_end)
         )
 
-    if target_mean is not None:
-        target_mean = target_mean.to(device)
-    if target_std is not None:
-        target_std = target_std.to(device)
-
     pred_chunks: List[torch.Tensor] = []
     truth_chunks: List[torch.Tensor] = []
     records: List[Dict[str, float]] = []
@@ -178,8 +167,8 @@ def run_offline_eval_from_future(
         src, src_mask = prepare_source_tensor(
             src_window=src_window,
             device=device,
-            input_mean=input_mean,
-            input_std=input_std,
+            input_mean=None,
+            input_std=None,
         )
 
         pred_norm = autoregressive_forecast(
@@ -191,7 +180,10 @@ def run_offline_eval_from_future(
             out_dim=out_dim,
             start_token_mode=infer_cfg.get("start_token_mode", "zeros"),
         )
-        pred = denormalize_tensor(pred_norm, target_mean, target_std)[0].detach().cpu()
+
+        # Legacy denormalization path is intentionally disabled after rollback.
+        # pred = denormalize_tensor(pred_norm, target_mean, target_std)[0].detach().cpu()
+        pred = pred_norm[0].detach().cpu()
 
         available = min(pred_length, eval_end - origin)
         truth = full_series[origin : origin + available, out_cols].detach().cpu()
@@ -251,11 +243,12 @@ def main():
     model = build_model_from_config(model_cfg, device)
     load_model_weights(model, infer_cfg["checkpoint_path"], device)
 
-    stats = load_normalization_stats(infer_cfg.get("normalization_stats_path"))
-    input_mean = stats["input_mean"] if stats else None
-    input_std = stats["input_std"] if stats else None
-    target_mean = stats["target_mean"] if stats else None
-    target_std = stats["target_std"] if stats else None
+    # Legacy normalization path (disabled after rollback):
+    # stats = load_normalization_stats(infer_cfg.get("normalization_stats_path"))
+    # input_mean = stats["input_mean"] if stats else None
+    # input_std = stats["input_std"] if stats else None
+    # target_mean = stats["target_mean"] if stats else None
+    # target_std = stats["target_std"] if stats else None
 
     if infer_cfg.get("future_path"):
         run_offline_eval_from_future(
@@ -264,10 +257,6 @@ def main():
             model_cfg=model_cfg,
             data_cfg=data_cfg,
             infer_cfg=infer_cfg,
-            input_mean=input_mean,
-            input_std=input_std,
-            target_mean=target_mean,
-            target_std=target_std,
         )
         return
 
@@ -281,8 +270,8 @@ def main():
     src, src_mask = prepare_source_tensor(
         src_window=src_window,
         device=device,
-        input_mean=input_mean,
-        input_std=input_std,
+        input_mean=None,
+        input_std=None,
     )
 
     pred_norm = autoregressive_forecast(
@@ -295,11 +284,9 @@ def main():
         start_token_mode=infer_cfg.get("start_token_mode", "zeros"),
     )
 
-    if target_mean is not None:
-        target_mean = target_mean.to(device)
-    if target_std is not None:
-        target_std = target_std.to(device)
-    pred = denormalize_tensor(pred_norm, target_mean, target_std)
+    # Legacy denormalization path (disabled after rollback):
+    # pred = denormalize_tensor(pred_norm, target_mean, target_std)
+    pred = pred_norm
 
     output_path = infer_cfg.get("output_path", "outputs/predictions.csv")
     export_predictions_to_csv(pred, output_path)

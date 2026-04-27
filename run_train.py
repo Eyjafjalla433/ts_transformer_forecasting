@@ -1,6 +1,8 @@
 ﻿import csv
+import math
+import time
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
@@ -117,6 +119,29 @@ def split_series_for_train_val(
     return train_series, val_series
 
 
+def _open_metrics_writer(metrics_path: str, append: bool = False):
+    """Open CSV writer for per-epoch metrics and write header when needed."""
+    path = Path(metrics_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_exists = path.exists()
+    mode = "a" if append else "w"
+    f = path.open(mode, encoding="utf-8", newline="")
+    fieldnames = [
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "lr",
+        "epoch_seconds",
+        "best_val_loss_so_far",
+        "is_best_epoch",
+    ]
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    if (not append) or (append and not file_exists):
+        writer.writeheader()
+    return f, writer
+
+
 def main():
     """Train the model for multiple epochs and save the best checkpoint."""
     cfg = load_config("configs/default.yaml")
@@ -164,6 +189,10 @@ def main():
         pred_length=pred_length,
     )
 
+    # Legacy normalization logic moved to preprocessing.py.
+    # train_series = (train_series - mean) / std
+    # val_series = (val_series - mean) / std
+
     train_set = TimeSeriesWindowDataset(
         series=train_series,
         input_length=input_length,
@@ -195,76 +224,121 @@ def main():
         dropout=float(model_cfg.get("dropout", 0.1)),
     ).to(device)
 
+    num_epochs = int(train_cfg.get("epochs", 20))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg.get("lr", 1e-3)))
-    scheduler = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    steps_per_epoch = max(1, len(train_loader))
+    total_steps = max(1, steps_per_epoch * num_epochs)
+    warmup_steps = int(train_cfg.get("warmup_steps", max(100, int(total_steps * 0.05))))
+    warmup_steps = max(1, min(warmup_steps, total_steps))
+    min_lr_ratio = float(train_cfg.get("min_lr_ratio", 0.05))
+    min_lr_ratio = max(0.0, min(min_lr_ratio, 1.0))
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return max(min_lr_ratio, cosine)
+
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
     loss_compute = SimpleLossCompute()
 
-    num_epochs = int(train_cfg.get("epochs", 20))
     accum_iter = int(train_cfg.get("accum_iter", 1))
     train_state = TrainState()
 
     best_val_loss = float("inf")
     best_epoch = -1
+    run_start = time.perf_counter()
 
     checkpoint_path = infer_cfg.get("checkpoint_path", "checkpoints/model.pt")
     checkpoint_path = Path(checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    metrics_path = str(train_cfg.get("metrics_csv_path", "outputs/train_metrics.csv"))
+    metrics_append = bool(train_cfg.get("metrics_append", False))
+    metrics_file, metrics_writer = _open_metrics_writer(metrics_path=metrics_path, append=metrics_append)
 
     print(
         "Loaded series shape: {} | train steps: {} | val steps: {} | train windows: {} | val windows: {}"
         .format(tuple(series.shape), train_series.size(0), val_series.size(0), len(train_set), len(val_set))
     )
 
-    for epoch in range(1, num_epochs + 1):
-        model.train()
-        train_loss, train_state = run_epoch(
-            data_iter=build_batch_iter(train_loader, device),
-            model=model,
-            loss_compute=loss_compute,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            mode="train",
-            accum_iter=accum_iter,
-            train_state=train_state,
-        )
+    try:
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.perf_counter()
 
-        model.eval()
-        with torch.no_grad():
-            val_loss, _ = run_epoch(
-                data_iter=build_batch_iter(val_loader, device),
+            model.train()
+            train_loss, train_state = run_epoch(
+                data_iter=build_batch_iter(train_loader, device),
                 model=model,
                 loss_compute=loss_compute,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                mode="eval",
+                mode="train",
                 accum_iter=accum_iter,
                 train_state=train_state,
             )
 
-        print(
-            "Epoch {:03d} | train_loss {:.6f} | val_loss {:.6f}".format(
-                epoch, train_loss, val_loss
-            )
-        )
+            model.eval()
+            with torch.no_grad():
+                val_loss, _ = run_epoch(
+                    data_iter=build_batch_iter(val_loader, device),
+                    model=model,
+                    loss_compute=loss_compute,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    mode="eval",
+                    accum_iter=accum_iter,
+                    train_state=train_state,
+                )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch = epoch
-            save_checkpoint(
-                path=str(checkpoint_path),
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                best_val_loss=best_val_loss,
-                extra={"model_config": model_cfg},
+            is_best_epoch = 0
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                is_best_epoch = 1
+                save_checkpoint(
+                    path=str(checkpoint_path),
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epoch=epoch,
+                    best_val_loss=best_val_loss,
+                    extra={"model_config": model_cfg},
+                )
+
+            epoch_seconds = time.perf_counter() - epoch_start
+            lr = float(optimizer.param_groups[0]["lr"])
+            metrics_row: Dict[str, float] = {
+                "epoch": epoch,
+                "train_loss": float(train_loss),
+                "val_loss": float(val_loss),
+                "lr": lr,
+                "epoch_seconds": float(epoch_seconds),
+                "best_val_loss_so_far": float(best_val_loss),
+                "is_best_epoch": is_best_epoch,
+            }
+            metrics_writer.writerow(metrics_row)
+            metrics_file.flush()
+
+            print(
+                "Epoch {:03d} | train_loss {:.6f} | val_loss {:.6f}".format(
+                    epoch, train_loss, val_loss
+                )
             )
+    finally:
+        metrics_file.close()
 
     print("Training completed.")
     print("best_epoch:", best_epoch)
     print("best_val_loss:", best_val_loss)
     print("saved_checkpoint:", str(checkpoint_path))
+    print("metrics_csv:", metrics_path)
+    print("total_seconds:", time.perf_counter() - run_start)
 
 
 if __name__ == "__main__":
     main()
+
+

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -156,6 +157,40 @@ def _derive_split_paths(output_path: str) -> Tuple[str, str]:
     return str(train_path), str(future_path)
 
 
+def _derive_stats_path(output_path: str) -> str:
+    path = Path(output_path)
+    return str(path.with_name("{}_normalization.json".format(path.stem)))
+
+
+def compute_standardization_stats(table: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    """Compute column-wise mean/std for standardization."""
+    mean = table.mean(axis=0)
+    std = table.std(axis=0).replace(0.0, 1e-6).fillna(1e-6)
+    return mean, std
+
+
+def apply_standardization(table: pd.DataFrame, mean: pd.Series, std: pd.Series) -> pd.DataFrame:
+    """Apply z-score standardization."""
+    return (table - mean) / std
+
+
+def save_standardization_stats(
+    output_path: str,
+    columns: Sequence[str],
+    mean: pd.Series,
+    std: pd.Series,
+) -> None:
+    payload = {
+        "columns": list(columns),
+        "feature_mean": [float(mean[col]) for col in columns],
+        "feature_std": [float(std[col]) for col in columns],
+    }
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def save_wide_table(table: pd.DataFrame, output_path: str) -> None:
     """Save the processed [T, F] table as a CSV with feature headers."""
     path = Path(output_path)
@@ -237,6 +272,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional output path for future split wide CSV.",
     )
+    parser.add_argument(
+        "--standardize",
+        action="store_true",
+        help=(
+            "Apply z-score standardization before saving outputs. "
+            "When future split is enabled, stats are computed from train split only."
+        ),
+    )
+    parser.add_argument(
+        "--stats-output-path",
+        default=None,
+        help="Optional JSON path to save standardization stats.",
+    )
     return parser
 
 
@@ -254,8 +302,7 @@ def main() -> None:
         target_cols=args.target_cols,
     )
 
-    print("Saved processed table to:", args.output_path)
-    print("Processed shape:", tuple(wide_table.shape))
+    print("Processed raw shape:", tuple(wide_table.shape))
     print("Columns:", list(wide_table.columns))
 
     if args.future_ratio is not None:
@@ -267,13 +314,59 @@ def main() -> None:
             wide_table=wide_table,
             future_ratio=float(args.future_ratio),
         )
+
+        if args.standardize:
+            mean, std = compute_standardization_stats(train_table)
+            train_table = apply_standardization(train_table, mean, std)
+            future_table = apply_standardization(future_table, mean, std)
+            wide_table = apply_standardization(wide_table, mean, std)
+
+            stats_output_path = args.stats_output_path or _derive_stats_path(args.output_path)
+            save_standardization_stats(
+                output_path=stats_output_path,
+                columns=list(wide_table.columns),
+                mean=mean,
+                std=std,
+            )
+            print("Applied standardization: yes (stats from train split)")
+            print("Saved standardization stats to:", stats_output_path)
+        else:
+            # Legacy path: outputs stay in original scale.
+            # train_table = train_table
+            # future_table = future_table
+            pass
+
+        save_wide_table(wide_table, args.output_path)
         save_wide_table(train_table, train_output_path)
         save_wide_table(future_table, future_output_path)
 
+        print("Saved processed table to:", args.output_path)
+        print("Processed shape:", tuple(wide_table.shape))
         print("Saved train split to:", train_output_path)
         print("Train split shape:", tuple(train_table.shape))
         print("Saved future split to:", future_output_path)
         print("Future split shape:", tuple(future_table.shape))
+    else:
+        if args.standardize:
+            mean, std = compute_standardization_stats(wide_table)
+            wide_table = apply_standardization(wide_table, mean, std)
+            stats_output_path = args.stats_output_path or _derive_stats_path(args.output_path)
+            save_standardization_stats(
+                output_path=stats_output_path,
+                columns=list(wide_table.columns),
+                mean=mean,
+                std=std,
+            )
+            print("Applied standardization: yes (stats from full table)")
+            print("Saved standardization stats to:", stats_output_path)
+        else:
+            # Legacy path: output stays in original scale.
+            # wide_table = wide_table
+            pass
+
+        save_wide_table(wide_table, args.output_path)
+        print("Saved processed table to:", args.output_path)
+        print("Processed shape:", tuple(wide_table.shape))
 
     if args.input_length is not None:
         last_window = extract_last_input_window(wide_table, input_length=args.input_length)

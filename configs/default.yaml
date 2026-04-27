@@ -1,15 +1,16 @@
 ﻿# Active baseline config (recommended for current stage)
 model:
-  src_dim: 5
+  src_dim: 21
   tgt_dim: 1
   out_dim: 1
   N: 2
+#  N: 1
   d_model: 64
   d_ff: 128
   h: 4
   dropout: 0.1
 
-# Original Transformer paper-scale setting (kept for future ablation)
+# Original Transformer paper-scale setting
 # model:
 #   src_dim: 6
 #   tgt_dim: 1
@@ -22,28 +23,43 @@ model:
 
 data:
   batch_size: 16
-  input_length: 24
-  pred_length: 12
-  train_csv: "data/processed/NASDAQ_wide.csv"
+  input_length: 12
+  pred_length: 6
+#  input_length: 6
+#  pred_length: 3
+  train_csv: "data/processed/Weather_wide_train.csv"
   train_csv_has_header: true
   synthetic_total_steps: 1000
 
 train:
   lr: 0.001
-  epochs: 20
+  epochs: 50
   val_ratio: 0.2
   accum_iter: 1
   split_seed: 42
-#  device: "cpu"
   device: "cuda"
+  warmup_steps: 200
+  min_lr_ratio: 0.05
+  metrics_csv_path: "outputs/Weather_train_metrics.csv"
+  metrics_append: false
 
 infer:
-#  device: "cpu"
   device: "cuda"
-  checkpoint_path: "checkpoints/model.pt"
+  checkpoint_path: "checkpoints/Weather_model.pt"
+
+  # Offline evaluation
+  future_path: "data/processed/Weather_wide_future.csv"
+  future_has_header: true
+  context_path: "data/processed/Weather_wide_train.csv"
+  context_has_header: true
+  eval_stride: 12
+
+  start_token_mode: "zeros"
+  normalization_stats_path: null
+
+  output_path: "outputs/Weather_Prediction.csv"
+  metrics_output_path: "outputs/Weather_Metrics.json"
+
+  # Legacy single-window fields (kept for compatibility)
   input_path: "data/infer_input.csv"
   input_has_header: true
-  start_token_mode: "zeros"  # options: zeros, last
-  normalization_stats_path: null  # JSON with input_mean/input_std/target_mean/target_std
-  output_path: "outputs/predictions.csv"
-
